@@ -12,6 +12,10 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from util import masked_softmax
 
 
+def printsize(emb, string):
+    print(f"\n \n {string} size: {emb.size()}. \n \n")
+
+
 class Embedding(nn.Module):
     """Embedding layer used by BiDAF, without the character-level component.
 
@@ -29,28 +33,60 @@ class Embedding(nn.Module):
         self.drop_prob = drop_prob
         self.word_embed = nn.Embedding.from_pretrained(word_vectors)
         self.char_embed = nn.Embedding.from_pretrained(char_vectors, freeze=False)
-        self.conv = nn.Conv2d(char_vectors.size(1), hidden_size, kernel_size=(1, 5))
+        self.conv = nn.Conv2d(
+            1, 2 * hidden_size, kernel_size=(64, 5)
+        )  # kernel = char_embed_size, channel_width
         nn.init.xavier_uniform_(self.conv.weight)
-        self.proj = nn.Linear(word_vectors.size(1), hidden_size, bias=False)
+        # self.proj = nn.Linear(word_vectors.size(1), hidden_size, bias=False)
         self.hwy = HighwayEncoder(2, hidden_size)
 
-    def forward(self, x):
-        char_emb = self.char_embed(x)  # (batch_size, seq_len, embed_size)
+    """
+    TO-DO: Dimensionality adjustment. Right now I'm outputting a 100-d embedding so the encoder layer won't
+    complain as it hasn't been adjusted. However, for QANet it should be a 500-d (300 from w and 200 from c)
+    """
+
+    # TO-DO: replace max and squeeze with maxpooling
+    def forward(self, w_idxs, c_idxs):
+        char_emb = self.char_embed(
+            c_idxs
+        )  # (batch_size, seq_len, word_len, embed_size)
+        word_emb = self.word_embed(w_idxs)  # (batch_size, seq_len, embed_size)
+        # printsize(char_emb, "char_embed")
+
+        char_emb_sizes = char_emb.size()
+
         char_emb = F.dropout(char_emb, self.drop_prob, self.training)
-        char_emb = self.conv(char_emb)  # (batch_size, seq_len, hidden_size)
-        char_emb = F.relu(char_emb)  # (batch_size, seq_len, hidden_size)
-        char_emb, _ = torch.max(char_emb, dim=2)
+        char_emb = char_emb.transpose(
+            2, 3
+        )  # (batch_size, seq_len, embed_size, word_len)
+        char_emb = char_emb.view(
+            -1, char_emb.size(2), char_emb.size(3)
+        )  # (batch_size * seq_len, embed_size, word_len)
+        char_emb = char_emb.unsqueeze(
+            1
+        )  # (batch_size * seq_len, 1, embed_size, word_len)
+        char_emb = self.conv(
+            char_emb
+        )  # (batch_size * seq_len, char_channel_size, 1, conv_len)
+        char_emb = F.relu(char_emb)
+        char_emb = (
+            char_emb.squeeze()
+        )  # (batch_size * seq_len, char_channel_size, conv_len)
+        char_emb = F.max_pool1d(
+            char_emb, char_emb.size(2)
+        )  # (batch_size * seq_len, char_channel_size, 1)
+        char_emb = char_emb.squeeze()  # (batch_size * seq_len, char_channel_size)
+        char_emb = char_emb.view(
+            char_emb_sizes[0], -1, 200
+        )  # (batch_size, seq_len, char_channel_size)
 
-        word_emb = self.word_embed(x)
+        # printsize(char_emb, "char_embed post conv")
+
         word_emb = F.dropout(word_emb, self.drop_prob, self.training)
-        word_emb = self.proj(word_emb)
+        # printsize(word_emb, "word_embed")
 
-        # emb = self.embed(x)   # (batch_size, seq_len, embed_size)
-        # emb = F.dropout(emb, self.drop_prob, self.training)
-        # emb = self.proj(emb)  # (batch_size, seq_len, hidden_size)
-
-        emb = torch.cat([word_emb, char_emb], dim=2)
-        emb = self.hwy(emb)  # (batch_size, seq_len, hidden_size)
+        emb = torch.cat([word_emb, char_emb], dim=-1)
+        emb = self.hwy(emb)
 
         return emb
 
@@ -71,10 +107,10 @@ class HighwayEncoder(nn.Module):
     def __init__(self, num_layers, hidden_size):
         super(HighwayEncoder, self).__init__()
         self.transforms = nn.ModuleList(
-            [nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)]
+            [nn.Linear(5 * hidden_size, 5 * hidden_size) for _ in range(num_layers)]
         )
         self.gates = nn.ModuleList(
-            [nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)]
+            [nn.Linear(5 * hidden_size, 5 * hidden_size) for _ in range(num_layers)]
         )
 
     def forward(self, x):
