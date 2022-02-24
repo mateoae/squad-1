@@ -4,6 +4,7 @@ Author:
     Chris Chute (chute@stanford.edu)
 """
 
+from numpy import pad
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -28,16 +29,24 @@ class Embedding(nn.Module):
         drop_prob (float): Probability of zero-ing out activations
     """
 
-    def __init__(self, word_vectors, char_vectors, hidden_size, drop_prob=0.05):
+    def __init__(self, word_vectors, char_vectors, hidden_size, drop_prob=0.1):
         super(Embedding, self).__init__()
         self.drop_prob = drop_prob
         self.word_embed = nn.Embedding.from_pretrained(word_vectors)
         self.char_embed = nn.Embedding.from_pretrained(char_vectors, freeze=False)
-        self.conv = nn.Conv2d(
-            1, 2 * hidden_size, kernel_size=(64, 5)
-        )  # kernel = char_embed_size, channel_width
+        self.emb_dim = self.char_embed.size(3)
+        self.conv = nn.Sequential(
+            nn.Conv2d(
+                self.emb_dim,
+                self.emb_dim,
+                kernel_size=7,
+                groups=self.emb_dim,
+                padding=7 // 2,
+            ),
+            nn.Conv2d(self.emb_dim, 200, kernel_size=1, padding=0),
+        )
         nn.init.xavier_uniform_(self.conv.weight)
-        # self.proj = nn.Linear(word_vectors.size(1), hidden_size, bias=False)
+        self.proj = nn.Linear(word_vectors.size(1), hidden_size, bias=False)
         self.hwy = HighwayEncoder(2, hidden_size)
 
     """
@@ -47,43 +56,17 @@ class Embedding(nn.Module):
 
     # TO-DO: replace max and squeeze with maxpooling
     def forward(self, w_idxs, c_idxs):
-        char_emb = self.char_embed(
-            c_idxs
-        )  # (batch_size, seq_len, word_len, embed_size)
-        word_emb = self.word_embed(w_idxs)  # (batch_size, seq_len, embed_size)
-        # printsize(char_emb, "char_embed")
+        char_emb = self.char_embed(c_idxs)  # (b, seq_len, word_len, embed_size)
+        char_emb = F.dropout(char_emb, 0.05, self.training)
+        char_emb = char_emb.permute(0, 3, 1, 2)  # (b, embed_size, seq_len, word_len)
+        char_emb = self.conv(char_emb)  # (b, embed_size, seq_len, word_len)
+        char_emb = F.relu(char_emb)  # (b, embed_size, seq_len, word_len)
+        char_emb, idxs = torch.max(char_emb, dim=-1)  # (b, embed_size, seq_len)
+        char_emb = char_emb.permute(0, 2, 1)
 
-        char_emb_sizes = char_emb.size()
-
-        char_emb = F.dropout(char_emb, self.drop_prob, self.training)
-        char_emb = char_emb.transpose(
-            2, 3
-        )  # (batch_size, seq_len, embed_size, word_len)
-        char_emb = char_emb.view(
-            -1, char_emb.size(2), char_emb.size(3)
-        )  # (batch_size * seq_len, embed_size, word_len)
-        char_emb = char_emb.unsqueeze(
-            1
-        )  # (batch_size * seq_len, 1, embed_size, word_len)
-        char_emb = self.conv(
-            char_emb
-        )  # (batch_size * seq_len, char_channel_size, 1, conv_len)
-        char_emb = F.relu(char_emb)
-        char_emb = (
-            char_emb.squeeze()
-        )  # (batch_size * seq_len, char_channel_size, conv_len)
-        char_emb = F.max_pool1d(
-            char_emb, char_emb.size(2)
-        )  # (batch_size * seq_len, char_channel_size, 1)
-        char_emb = char_emb.squeeze()  # (batch_size * seq_len, char_channel_size)
-        char_emb = char_emb.view(
-            char_emb_sizes[0], -1, 200
-        )  # (batch_size, seq_len, char_channel_size)
-
-        # printsize(char_emb, "char_embed post conv")
-
+        word_emb = self.word_embed(w_idxs)  # (b, seq_len, embed_size)
         word_emb = F.dropout(word_emb, self.drop_prob, self.training)
-        # printsize(word_emb, "word_embed")
+        word_emb = self.proj(word_emb)
 
         emb = torch.cat([word_emb, char_emb], dim=-1)
         emb = self.hwy(emb)
