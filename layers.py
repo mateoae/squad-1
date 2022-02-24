@@ -34,7 +34,7 @@ class Embedding(nn.Module):
         self.drop_prob = drop_prob
         self.word_embed = nn.Embedding.from_pretrained(word_vectors)
         self.char_embed = nn.Embedding.from_pretrained(char_vectors, freeze=False)
-        self.emb_dim = self.char_embed.size(3)
+        self.emb_dim = self.char_embed.embedding_dim
         self.conv = nn.Sequential(
             nn.Conv2d(
                 self.emb_dim,
