@@ -4,6 +4,7 @@ Author:
     Chris Chute (chute@stanford.edu)
 """
 
+from turtle import forward
 from numpy import pad
 import torch
 import torch.nn as nn
@@ -65,11 +66,12 @@ class Embedding(nn.Module):
 
         word_emb = self.word_embed(w_idxs)  # (b, seq_len, embed_size)
         word_emb = F.dropout(word_emb, self.drop_prob, self.training)
-        word_emb = self.proj(word_emb)
+        # word_emb = self.proj(word_emb)
 
         emb = torch.cat([word_emb, char_emb], dim=-1)
         emb = self.hwy(emb)
 
+        # printsize(emb, "Output from embedding layer")
         return emb
 
 
@@ -103,6 +105,100 @@ class HighwayEncoder(nn.Module):
             x = g * t + (1 - g) * x
 
         return x
+
+
+class DWConv(nn.Module):
+    def __init__(self, emb_dim):
+        super(DWConv, self).__init__()
+        self.depth = nn.Conv1d(
+            emb_dim, emb_dim, kernel_size=7, groups=emb_dim, padding=7 // 2,
+        )
+        self.point = nn.Conv1d(emb_dim, emb_dim, kernel_size=1, padding=0)
+
+    def forward(self, x):
+        a = self.depth(x)
+        b = self.point(a)
+        return b
+
+
+class MultiSelfAttention(nn.Module):
+    def __init__(self, in_dim, num_heads, drop_prob, batch_first=True):
+        super(MultiSelfAttention, self).__init__()
+        self.multihead_self_attention = nn.MultiheadAttention(
+            in_dim, num_heads, drop_prob, batch_first
+        )
+        self.queries = nn.Linear(in_dim, in_dim)
+        self.keys = nn.Linear(in_dim, in_dim)
+        self.values = nn.Linear(in_dim, in_dim)
+
+    def forward(self, x):
+        Q = self.queries(x)
+        K = self.keys(x)
+        V = self.values(x)
+
+        return self.multihead_self_attention(Q, K, V)
+
+
+class QANetEnc(nn.Module):
+    def __init__(self, in_dim, num_conv, drop_prob, num_heads):
+        super(QANetEnc, self).__init__()
+        self.layernorm = nn.LayerNorm(128)
+        self.ffnorm = nn.LayerNorm(128)
+        self.sanorm = nn.LayerNorm(128)
+        self.num_conv = num_conv
+        self.drop_prob = drop_prob
+        self.layernorms = nn.ModuleList([nn.LayerNorm(128) for i in range(num_conv)])
+        self.convolutions = nn.ModuleList([DWConv(128) for i in range(num_conv)])
+        self.multihead_self_attention = MultiSelfAttention(
+            128, num_heads, drop_prob, True
+        )
+        self.mapConv = nn.Conv1d(in_dim, 128, 7, padding=7 // 2)
+        self.ff = nn.Linear(128, 128)
+
+    def forward(self, x):
+        # printsize(x, "Input received by QANetEnc layer")
+
+        # map to 128 per spec. If you don't do this, you get the error: embed_dim must be divisible by num_heads
+        x = x.transpose(1, 2)
+        x = self.mapConv(x)
+        x = x.transpose(1, 2)
+        # printsize(x, "Input aftr mapping to 128 with conv1d")
+
+        for i in range(self.num_conv):
+            residual = x
+            layernorm = self.layernorms[i]
+            x = layernorm(x)
+            # printsize(x, "Output after layernorm")
+            conv = self.convolutions[i]
+            x = x.transpose(1, 2)
+            x = conv(x)
+            x = F.relu_(x)
+            x = x.transpose(1, 2)
+            # printsize(x, "Output after convolution")
+            x = x + residual
+            # printsize(x, "Output after resnet")
+            if (i + 1) % 2 == 0:
+                x = F.dropout(x, self.drop_prob, self.training)
+
+        # printsize(x, "Output after 4 conv miniblocks")
+
+        residual2 = x
+        x2 = self.sanorm(x)
+        # x2 = F.dropout(x2, p=0.1)
+        x2, _ = self.multihead_self_attention(x2)  # ret outputs and weights
+        # printsize(x2, "Output after multihead self attention")
+        x2 = F.dropout(x + residual2, p=0.1)
+        #x2 += residual2
+
+        residual3 = x2
+        x3 = self.ffnorm(x2)
+        x3 = self.ff(x3)
+        x3 = F.relu(x3)
+        x3 = F.dropout(x3 + residual3, p=0.1)
+        #x3 += residual3  # (batch_size, seq_len, 128)
+
+        # printsize(x3, "Output returned by encoder block")
+        return x3
 
 
 class RNNEncoder(nn.Module):
@@ -237,7 +333,7 @@ class BiDAFOutput(nn.Module):
 
     def __init__(self, hidden_size, drop_prob):
         super(BiDAFOutput, self).__init__()
-        self.att_linear_1 = nn.Linear(8 * hidden_size, 1)
+        self.att_linear_1 = nn.Linear(4 * hidden_size, 1)
         self.mod_linear_1 = nn.Linear(2 * hidden_size, 1)
 
         self.rnn = RNNEncoder(
@@ -247,7 +343,7 @@ class BiDAFOutput(nn.Module):
             drop_prob=drop_prob,
         )
 
-        self.att_linear_2 = nn.Linear(8 * hidden_size, 1)
+        self.att_linear_2 = nn.Linear(4 * hidden_size, 1)
         self.mod_linear_2 = nn.Linear(2 * hidden_size, 1)
 
     def forward(self, att, mod, mask):

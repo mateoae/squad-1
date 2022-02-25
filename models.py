@@ -8,6 +8,10 @@ import torch
 import torch.nn as nn
 
 
+def printsize(emb, string):
+    print(f"\n \n {string} size: {emb.size()}. \n \n")
+
+
 class BiDAF(nn.Module):
     """Baseline BiDAF model for SQuAD.
     Based on the paper:
@@ -35,6 +39,10 @@ class BiDAF(nn.Module):
             drop_prob=drop_prob,
         )
 
+        self.enc_block = layers.QANetEnc(
+            in_dim=5 * hidden_size, num_conv=4, drop_prob=0.1, num_heads=8
+        )
+
         # changed input size to 500 as transition to QANet
         self.enc = layers.RNNEncoder(
             input_size=5 * hidden_size,
@@ -44,17 +52,14 @@ class BiDAF(nn.Module):
         )
 
         self.att = layers.BiDAFAttention(
-            hidden_size=2 * hidden_size, drop_prob=drop_prob
-        )
+            hidden_size=128, drop_prob=drop_prob
+        )  # returns 4*h
 
         self.mod = layers.RNNEncoder(
-            input_size=8 * hidden_size,
-            hidden_size=hidden_size,
-            num_layers=2,
-            drop_prob=drop_prob,
+            input_size=4 * 128, hidden_size=128, num_layers=2, drop_prob=drop_prob,
         )
 
-        self.out = layers.BiDAFOutput(hidden_size=hidden_size, drop_prob=drop_prob)
+        self.out = layers.BiDAFOutput(hidden_size=128, drop_prob=drop_prob)
 
     def forward(self, cw_idxs, qw_idxs, cc_idxs, qc_idxs):
         c_mask = torch.zeros_like(cw_idxs) != cw_idxs
@@ -64,14 +69,23 @@ class BiDAF(nn.Module):
         c_emb = self.emb(cw_idxs, cc_idxs)  # (batch_size, c_len, hidden_size)
         q_emb = self.emb(qw_idxs, qc_idxs)  # (batch_size, q_len, hidden_size)
 
-        c_enc = self.enc(c_emb, c_len)  # (batch_size, c_len, 2 * hidden_size)
-        q_enc = self.enc(q_emb, q_len)  # (batch_size, q_len, 2 * hidden_size)
+        # c_enc = self.enc(c_emb, c_len)  # (batch_size, c_len, 2 * hidden_size)
+        # q_enc = self.enc(q_emb, q_len)  # (batch_size, q_len, 2 * hidden_size)
+
+        c_enc = self.enc_block(c_emb)  # (batch_size, c_len, 2 * hidden_size)
+        q_enc = self.enc_block(q_emb)  # (batch_size, q_len, 2 * hidden_size)
+
+        # printsize(c_enc, "outputs returned by encoder block")
 
         att = self.att(
             c_enc, q_enc, c_mask, q_mask
         )  # (batch_size, c_len, 8 * hidden_size)
 
+        # printsize(att, "outputs returned by attention")
+
         mod = self.mod(att, c_len)  # (batch_size, c_len, 2 * hidden_size)
+
+        # printsize(mod, "outputs returned by encoder modeling layer")
 
         out = self.out(att, mod, c_mask)  # 2 tensors, each (batch_size, c_len)
 
