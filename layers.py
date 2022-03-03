@@ -141,32 +141,32 @@ import math
 from torch.autograd import Variable
 
 
-# class PositionEncoding(nn.Module):
-#     def __init__(self, model_dim, max_length=512):
+class PositionEncoding(nn.Module):
+    def __init__(self, model_dim, max_length=512):
 
-#         super().__init__()
-#         self.model_dim = model_dim
-#         pos_encoding = torch.zeros(max_length, model_dim)
-#         for pos in range(max_length):
-#             for i in range(0, model_dim, 2):
-#                 pos_encoding[pos, i] = math.sin(pos / (10000 ** ((2 * i) / model_dim)))
-#                 pos_encoding[pos, i + 1] = math.cos(
-#                     pos / (10000 ** ((2 * (i + 1)) / model_dim))
-#                 )
+        super().__init__()
+        self.model_dim = model_dim
+        pos_encoding = torch.zeros(max_length, model_dim)
+        for pos in range(max_length):
+            for i in range(0, model_dim, 2):
+                pos_encoding[pos, i] = math.sin(pos / (10000 ** ((2 * i) / model_dim)))
+                pos_encoding[pos, i + 1] = math.cos(
+                    pos / (10000 ** ((2 * (i + 1)) / model_dim))
+                )
 
-#         pos_encoding = pos_encoding.unsqueeze(0)
-#         self.register_buffer("pos_encoding", pos_encoding)
+        pos_encoding = pos_encoding.unsqueeze(0)
+        self.register_buffer("pos_encoding", pos_encoding)
 
-#     def forward(self, x):
-#         enc = Variable(self.pos_encoding[:, : x.shape[1]], requires_grad=False)
-#         x = x + enc
-#         return x
+    def forward(self, x):
+        enc = Variable(self.pos_encoding[:, : x.shape[1]], requires_grad=False)
+        x = x + enc
+        return x
 
 
 class QANetEnc(nn.Module):
     def __init__(self, in_dim, num_conv, drop_prob, num_heads):
         super(QANetEnc, self).__init__()
-        # self.position_encoding = PositionEncoding(in_dim)
+        self.position_encoding = PositionEncoding(in_dim)
         self.layernorm = nn.LayerNorm(128)
         self.ffnorm = nn.LayerNorm(128)
         self.sanorm = nn.LayerNorm(128)
@@ -182,7 +182,7 @@ class QANetEnc(nn.Module):
 
     def forward(self, x, is_from_emb):
         # printsize(x, "Input received by QANetEnc layer")
-        # x = self.position_encoding(x)
+        x = self.position_encoding(x)
         # map to 128 per spec. If you don't do this, you get the error: embed_dim must be divisible by num_heads
         # do it only for the encoder block. This module is used also by the modeling block
         if is_from_emb:

@@ -66,7 +66,7 @@ class BiDAF(nn.Module):
             ]
         )
 
-        self.attentionResize = layers.DWConv(128)
+        self.attentionResize = layers.DWConv(128 * 4)
 
         self.out = layers.BiDAFOutput(hidden_size=128, drop_prob=drop_prob)
 
@@ -97,8 +97,8 @@ class BiDAF(nn.Module):
         mod = att
         mod = mod.transpose(1, 2)
         mod = self.attentionResize(mod)
-        mod = mod.transpose(1,2)
-        
+        mod = mod.transpose(1, 2)
+
         for block in self.ModEncBlocks:
             mod = block(mod, False)
 
