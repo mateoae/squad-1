@@ -57,8 +57,8 @@ class Embedding(nn.Module):
     # TO-DO: replace max and squeeze with maxpooling
     def forward(self, w_idxs, c_idxs):
         char_emb = self.char_embed(c_idxs)  # (b, seq_len, word_len, embed_size)
-        char_emb = F.dropout(char_emb, 0.05, self.training)
         char_emb = char_emb.permute(0, 3, 1, 2)  # (b, embed_size, seq_len, word_len)
+        char_emb = F.dropout(char_emb, 0.05, self.training)
         char_emb = self.conv(char_emb)  # (b, embed_size, seq_len, word_len)
         char_emb = F.relu(char_emb)  # (b, embed_size, seq_len, word_len)
         char_emb, idxs = torch.max(char_emb, dim=-1)  # (b, embed_size, seq_len)
@@ -69,7 +69,7 @@ class Embedding(nn.Module):
         # word_emb = self.proj(word_emb)
 
         emb = torch.cat([word_emb, char_emb], dim=-1)
-        emb = self.hwy(emb)
+        emb = self.hwy(emb)  # (b, seq_len, 500)
 
         # printsize(emb, "Output from embedding layer")
         return emb
@@ -110,10 +110,8 @@ class HighwayEncoder(nn.Module):
 class DWConv(nn.Module):
     def __init__(self, emb_dim):
         super(DWConv, self).__init__()
-        self.depth = nn.Conv1d(
-            emb_dim, emb_dim, kernel_size=7, groups=emb_dim, padding=7 // 2,
-        )
-        self.point = nn.Conv1d(emb_dim, emb_dim, kernel_size=1, padding=0)
+        self.depth = nn.Conv1d(emb_dim, 128, kernel_size=7, groups=128, padding=7 // 2,)
+        self.point = nn.Conv1d(128, 128, kernel_size=1, padding=0)
 
     def forward(self, x):
         a = self.depth(x)
@@ -139,9 +137,36 @@ class MultiSelfAttention(nn.Module):
         return self.multihead_self_attention(Q, K, V)
 
 
+import math
+from torch.autograd import Variable
+
+
+class PositionEncoding(nn.Module):
+    def __init__(self, model_dim, max_length=512):
+
+        super().__init__()
+        self.model_dim = model_dim
+        pos_encoding = torch.zeros(max_length, model_dim)
+        for pos in range(max_length):
+            for i in range(0, model_dim, 2):
+                pos_encoding[pos, i] = math.sin(pos / (10000 ** ((2 * i) / model_dim)))
+                pos_encoding[pos, i + 1] = math.cos(
+                    pos / (10000 ** ((2 * (i + 1)) / model_dim))
+                )
+
+        pos_encoding = pos_encoding.unsqueeze(0)
+        self.register_buffer("pos_encoding", pos_encoding)
+
+    def forward(self, x):
+        enc = Variable(self.pos_encoding[:, : x.shape[1]], requires_grad=False)
+        x = x + enc
+        return x
+
+
 class QANetEnc(nn.Module):
     def __init__(self, in_dim, num_conv, drop_prob, num_heads):
         super(QANetEnc, self).__init__()
+        self.position_encoding = PositionEncoding(in_dim)
         self.layernorm = nn.LayerNorm(128)
         self.ffnorm = nn.LayerNorm(128)
         self.sanorm = nn.LayerNorm(128)
@@ -155,15 +180,18 @@ class QANetEnc(nn.Module):
         self.mapConv = nn.Conv1d(in_dim, 128, 7, padding=7 // 2)
         self.ff = nn.Linear(128, 128)
 
-    def forward(self, x):
+    def forward(self, x, is_from_emb):
         # printsize(x, "Input received by QANetEnc layer")
-
+        x = self.position_encoding(x)
         # map to 128 per spec. If you don't do this, you get the error: embed_dim must be divisible by num_heads
-        x = x.transpose(1, 2)
-        x = self.mapConv(x)
-        x = x.transpose(1, 2)
+        # do it only for the encoder block. This module is used also by the modeling block
+        if is_from_emb:
+            x = x.transpose(1, 2)
+            x = self.mapConv(x)
+            x = x.transpose(1, 2)
         # printsize(x, "Input aftr mapping to 128 with conv1d")
 
+        # Layernorm + Conv block
         for i in range(self.num_conv):
             residual = x
             layernorm = self.layernorms[i]
@@ -175,27 +203,29 @@ class QANetEnc(nn.Module):
             x = F.relu_(x)
             x = x.transpose(1, 2)
             # printsize(x, "Output after convolution")
-            x = x + residual
+            # x = x + residual
             # printsize(x, "Output after resnet")
             if (i + 1) % 2 == 0:
-                x = F.dropout(x, self.drop_prob, self.training)
+                x = F.dropout(x + residual, self.drop_prob, self.training)
 
         # printsize(x, "Output after 4 conv miniblocks")
 
+        # Self-attention block
         residual2 = x
         x2 = self.sanorm(x)
         # x2 = F.dropout(x2, p=0.1)
         x2, _ = self.multihead_self_attention(x2)  # ret outputs and weights
         # printsize(x2, "Output after multihead self attention")
         x2 = F.dropout(x + residual2, p=0.1)
-        #x2 += residual2
+        # x2 += residual2
 
+        # feedforward
         residual3 = x2
         x3 = self.ffnorm(x2)
         x3 = self.ff(x3)
         x3 = F.relu(x3)
         x3 = F.dropout(x3 + residual3, p=0.1)
-        #x3 += residual3  # (batch_size, seq_len, 128)
+        # x3 += residual3  # (batch_size, seq_len, 128)
 
         # printsize(x3, "Output returned by encoder block")
         return x3
@@ -333,24 +363,25 @@ class BiDAFOutput(nn.Module):
 
     def __init__(self, hidden_size, drop_prob):
         super(BiDAFOutput, self).__init__()
-        self.att_linear_1 = nn.Linear(4 * hidden_size, 1)
-        self.mod_linear_1 = nn.Linear(2 * hidden_size, 1)
+        self.W1 = nn.Linear(2 * hidden_size, 1, bias=False)
+        self.W2 = nn.Linear(2 * hidden_size, 1, bias=False)
 
-        self.rnn = RNNEncoder(
-            input_size=2 * hidden_size,
-            hidden_size=hidden_size,
-            num_layers=1,
-            drop_prob=drop_prob,
-        )
+        # self.rnn = RNNEncoder(
+        #     input_size=2 * hidden_size,
+        #     hidden_size=hidden_size,
+        #     num_layers=1,
+        #     drop_prob=drop_prob,
+        # )
 
-        self.att_linear_2 = nn.Linear(4 * hidden_size, 1)
-        self.mod_linear_2 = nn.Linear(2 * hidden_size, 1)
+        # self.att_linear_2 = nn.Linear(4 * hidden_size, 1)
+        # self.mod_linear_2 = nn.Linear(2 * hidden_size, 1)
 
-    def forward(self, att, mod, mask):
-        # Shapes: (batch_size, seq_len, 1)
-        logits_1 = self.att_linear_1(att) + self.mod_linear_1(mod)
-        mod_2 = self.rnn(mod, mask.sum(-1))
-        logits_2 = self.att_linear_2(att) + self.mod_linear_2(mod_2)
+    def forward(self, m_0, m_1, m_2, mask):
+
+        logits_1 = torch.cat([m_0, m_1], dim=2)
+        logits_1 = self.W1(logits_1)
+        logits_2 = torch.cat([m_0, m_2], dim=2)
+        logits_2 = self.W2(logits_2)
 
         # Shapes: (batch_size, seq_len)
         log_p1 = masked_softmax(logits_1.squeeze(), mask, log_softmax=True)

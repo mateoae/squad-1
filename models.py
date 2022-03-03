@@ -59,6 +59,15 @@ class BiDAF(nn.Module):
             input_size=4 * 128, hidden_size=128, num_layers=2, drop_prob=drop_prob,
         )
 
+        self.ModEncBlocks = nn.ModuleList(
+            [
+                layers.QANetEnc(in_dim=128, num_conv=2, drop_prob=0.1, num_heads=8)
+                for i in range(7)
+            ]
+        )
+
+        self.attentionResize = layers.DWConv(128)
+
         self.out = layers.BiDAFOutput(hidden_size=128, drop_prob=drop_prob)
 
     def forward(self, cw_idxs, qw_idxs, cc_idxs, qc_idxs):
@@ -72,8 +81,8 @@ class BiDAF(nn.Module):
         # c_enc = self.enc(c_emb, c_len)  # (batch_size, c_len, 2 * hidden_size)
         # q_enc = self.enc(q_emb, q_len)  # (batch_size, q_len, 2 * hidden_size)
 
-        c_enc = self.enc_block(c_emb)  # (batch_size, c_len, 2 * hidden_size)
-        q_enc = self.enc_block(q_emb)  # (batch_size, q_len, 2 * hidden_size)
+        c_enc = self.enc_block(c_emb, True)  # (batch_size, c_len, 2 * hidden_size)
+        q_enc = self.enc_block(q_emb, True)  # (batch_size, q_len, 2 * hidden_size)
 
         # printsize(c_enc, "outputs returned by encoder block")
 
@@ -83,10 +92,26 @@ class BiDAF(nn.Module):
 
         # printsize(att, "outputs returned by attention")
 
-        mod = self.mod(att, c_len)  # (batch_size, c_len, 2 * hidden_size)
+        # mod = self.mod(att, c_len)  # (batch_size, c_len, 2 * hidden_size)
+
+        mod = att
+        mod = mod.transpose(1, 2)
+        mod = self.attentionResize(mod)
+        mod = mod.transpose(1,2)
+        
+        for block in self.ModEncBlocks:
+            mod = block(mod, False)
+
+        mod2 = mod
+        for block in self.ModEncBlocks:
+            mod2 = block(mod2, False)
+
+        mod3 = mod
+        for block in self.ModEncBlocks:
+            mod3 = block(mod3, False)
 
         # printsize(mod, "outputs returned by encoder modeling layer")
 
-        out = self.out(att, mod, c_mask)  # 2 tensors, each (batch_size, c_len)
+        out = self.out(mod, mod2, mod3, c_mask)  # 2 tensors, each (batch_size, c_len)
 
         return out
